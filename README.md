@@ -5,6 +5,6 @@ This folder contains the corresponding source code for upcoming or already publi
 
 The following is a detailed description of the code repository directory structure. 
 
-- Paper02_PIV_SR ---------->>> Studying dynamic behaviors of blocked flow in rectangular channels using the refined reconstruction method based on deep learning modeling; 
+- Paper02_PIV_SR ---------->>> A Deep Learning Modeling Approach for the Reconstruction of Flow Field Parameter Distributions towards PIV Fine Measurements; 
 
 It will be updated continuously. 

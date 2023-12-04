@@ -29,7 +29,7 @@ def TKE_calculating(args):
     index_x, index_y, index_u, index_v, index_d, index_M = 0, 1, 2, 3, 4, 5
 
     for file in tqdm(Pulsation_files_sorted, desc='TKE Processing'):
-        progression = 1
+        progression = 0
         file_path = args.input_path_Pulsation + '/' + file
         if args.file_type == 'txt':
             Pulsation_PIV_2D = np.loadtxt(file_path, dtype=np.float32, delimiter=' ')
@@ -51,11 +51,12 @@ def TKE_calculating(args):
 
         TKE_id = np.empty((Pulsation_PIV_2D.shape[0], totals), dtype=np.float32)
         TKE_id[:, progression:progression+1] = k
+        progression += 1
 
     TKE = np.mean(TKE_id, axis=1)
     TKE = np.expand_dims(TKE, axis=1)
 
-    file_random = args.input_path_Pulsation + '/' + Pulsation_files_sorted[0]
+    file_random = args.input_path_Pulsation + '/' + Pulsation_files_sorted[0]  # 任意选取一个文件，用于提取坐标
     if args.file_type == 'txt':
         Pulsation_PIV_2D = np.loadtxt(file_random, dtype=np.float32, delimiter=' ')
     elif args.file_type == 'dat':

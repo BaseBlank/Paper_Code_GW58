@@ -64,15 +64,27 @@ def main(args):
     dat_file_names_sorted = sorted(dat_file_names, key=lambda name: int(os.path.splitext(name.split('_')[1])[0]),
                                    reverse=False)
 
+    extremal_file_names = os.listdir(args.maxmin_path)
+    extremal_file_names_sorted = sorted(extremal_file_names, key=lambda name: int(os.path.splitext(name.split('_')[1])[0]),
+                                        reverse=False)
+
     progression = 1
     File_num = int(len(dat_file_names_sorted))
     print('The number of flow field data files to be reconstructed is {}'.format(File_num))
 
-    for dat_file_name in dat_file_names_sorted:
-        file_path = args.inputs_path + '/' + dat_file_name
+    for file_id in range(File_num):
+        file_path = args.inputs_path + '/' + dat_file_names_sorted[file_id]
+        file_path_gt = args.maxmin_path + '/' + extremal_file_names_sorted[file_id]
+        fluids_gt_3D = np.load(file_path_gt).astype(np.float32)
+
+        sr_id = int(os.path.splitext(dat_file_names_sorted[file_id].split('_')[1])[0])
+        gt_id = int(os.path.splitext(extremal_file_names_sorted[file_id].split('_')[1])[0])
+        assert sr_id == gt_id, 'The SR file id num and GT file id num is not equal.'
         # Load data for pre-processing, The data has been normalized to [0,1]
         # lr_tensor = imgproc.preprocess_one_image(args.inputs_path, device)
         lr_tensor, max_xy, min_xy = imgproc.preprocess_one_data(file_path, device)
+        max_xy = np.max(fluids_gt_3D, axis=(0, 1))  # One-dimensional arrays
+        min_xy = np.min(fluids_gt_3D, axis=(0, 1))
 
         # Use the model to generate super-resolved images
         with torch.no_grad():
@@ -113,6 +125,10 @@ if __name__ == "__main__":
                         type=str,
                         default="./figure",
                         help="Low-resolution flow data folder path.")
+    parser.add_argument("--maxmin_path",
+                        type=str,
+                        default="./figure",
+                        help="Load the maximum and minimum values corresponding to the data.")
     parser.add_argument("--output_path",
                         type=str,
                         default="./figure",

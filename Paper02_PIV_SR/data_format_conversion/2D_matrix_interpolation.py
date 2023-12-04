@@ -6,7 +6,7 @@ About the specific content of AGPL - 3.0 protocol, you can refer to the followin
 """
 # ==============================================================================
 
-# Traditional interpolation method realizes conversion of LR to HR data
+# Traditional interpolation method realizes conversion of LR to HR data, [u,v,d], 3D -> [m], 2D
 # Deprecated since version 1.10.0: interp2d is deprecated in SciPy 1.10 and will be removed in SciPy 1.12.0.
 # Use RegularGridInterpolator instead.
 

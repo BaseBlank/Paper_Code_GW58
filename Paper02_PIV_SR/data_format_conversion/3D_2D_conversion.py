@@ -8,7 +8,7 @@ The link to the reference code repository is as follows:
     https://github.com/Lornatang/RDN-PyTorch
 """
 # ==============================================================================
-# Convert the three-dimensional inference data calculated by neural network reasoning into two-dimensional data
+# Convert three-dimensional inference .npy data calculated by neural network reasoning into two-dimensional .txt data
 
 import numpy as np
 import os

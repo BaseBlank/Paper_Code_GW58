@@ -48,10 +48,10 @@ def Pulsation_calculating(args):
 
         # time.sleep(0.1)
 
-    u_mean = np.mean(u_id, axis=1)
+    u_mean = np.mean(u_id, axis=1)  # shape:[original_PIV_2D.shape[0],]
     v_mean = np.mean(v_id, axis=1)
 
-    u_mean = np.expand_dims(u_mean, axis=1)
+    u_mean = np.expand_dims(u_mean, axis=1)  # shape:[original_PIV_2D.shape[0],1]
     v_mean = np.expand_dims(v_mean, axis=1)
 
     with tqdm(total=File_num, desc='Calculation of progress', leave=True, unit='array', unit_scale=False) as pbar:

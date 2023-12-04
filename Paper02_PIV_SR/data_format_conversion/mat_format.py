@@ -57,7 +57,3 @@ if __name__ == "__main__":
 
     extract_data(args)
 
-    # Run
-    # os.system("python ./data_format_conversion.py --folder_path 'D:/PIV/export/4000-0.324/mat/PIVlab.mat' --variable_name 'u_filtered'")
-    # python ./data_format_conversion.py --folder_path D:/PIV/export/4000-0.324/mat/PIVlab.mat --variable_name u_filtered
-

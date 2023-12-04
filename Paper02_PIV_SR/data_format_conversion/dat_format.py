@@ -35,7 +35,7 @@ def extract_data(args):
                                      delimiter=' ')
 
         data_np = np.array(data_np_void.tolist(), dtype=np.float32)
-        data_np_sel = np.take(data_np, indices=[2, 3, 11], axis=1)
+        data_np_sel = np.take(data_np, indices=[2, 3, 11], axis=1)  # u, v, vector_direction
 
         for i in range(data_np_sel.shape[0]):
             if data_np_sel[i, 2] < 0:

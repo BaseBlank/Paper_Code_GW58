@@ -207,7 +207,7 @@ def preprocess_one_image(image_path: str, device: torch.device) -> Tensor:
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     # Convert image data to pytorch format data
-    tensor = image_to_tensor(image, False, False).unsqueeze_(0)
+    tensor = image_to_tensor(image, False, False).unsqueeze_(0)  # HWC to NCHW
 
     # Transfer tensor channel image format data to CUDA device
     tensor = tensor.to(device=device, memory_format=torch.channels_last, non_blocking=True)
