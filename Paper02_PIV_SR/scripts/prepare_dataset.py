@@ -9,69 +9,106 @@ The link to the reference code repository is as follows:
 """
 # ==============================================================================
 import argparse
-import multiprocessing
 import os
 import shutil
-
-import cv2
-import numpy as np
+import re
+from collections import defaultdict
 from tqdm import tqdm
+import numpy as np
+import random
+import multiprocessing
 
 
 def main(args) -> None:
-    """
+    try:
+        if os.path.exists(args.output_dir):
+            shutil.rmtree(args.output_dir)
+        os.makedirs(args.output_dir)
+    except Exception as e:
+        print(f"Error creating output directory: {e}")
+        return
 
-    Args:
-        args:
-    """
-    if os.path.exists(args.output_dir):
-        shutil.rmtree(args.output_dir)
-    os.makedirs(args.output_dir)
+    flow_file_names = os.listdir(args.dataset_dir)
+    if not flow_file_names:
+        print("No flow files found in the dataset directory.")
+        return
 
-    # Get all image paths
-    image_file_names = os.listdir(args.images_dir)
+    if args.all_flow_conditions_used:
+        # Use a dictionary to store a list of filenames for each group
+        groups = defaultdict(list)
 
-    # Splitting images with multiple threads
-    progress_bar = tqdm(total=len(image_file_names), unit="image", desc="Prepare split image")
+        # Group file names by the number following "PIV-"
+        for file in flow_file_names:
+            group_num = re.findall(r'\d+', file)[0]
+            groups[group_num].append(file)
+
+        # Sorts the list of filenames for each group and
+        # merges the sorted list into an ordered list
+        picked_flow_files = []
+        for group_num in sorted(groups.keys(), key=int):
+            sorted_group_files = sorted(groups[group_num], key=lambda x: int(re.findall(r'\d+', x)[1]))
+            picked_flow_files += sorted_group_files
+
+    else:
+        # Filter out filenames starting with PIV-1
+        piv1_files = [file for file in flow_file_names if file.startswith("PIV-1")]
+        # Extracts the numbers in the filenames and sorts them in order from smallest to largest
+        picked_flow_files = sorted(piv1_files, key=lambda x: int(re.findall(r'\d+', x)[1]))
+
+    # Splitting flow field with multiple threads
+    progress_bar = tqdm(total=len(picked_flow_files), unit="flow", desc="Prepare split flow flied")
     workers_pool = multiprocessing.Pool(args.num_workers)
-    for image_file_name in image_file_names:
-        workers_pool.apply_async(worker, args=(image_file_name, args), callback=lambda arg: progress_bar.update(1))
+    for flow_file_name in picked_flow_files:
+        workers_pool.apply_async(worker, args=(flow_file_name, args), callback=lambda arg: progress_bar.update(1))
     workers_pool.close()
     workers_pool.join()
     progress_bar.close()
 
 
-def worker(image_file_name, args) -> None:
-    """
+def worker(flow_file_name, args) -> None:
+    try:
+        flow_path = os.path.join(args.dataset_dir, flow_file_name)
+        flow = np.load(flow_path, allow_pickle=False)
 
-    Args:
-        image_file_name:
-        args:
-    """
-    image = cv2.imread(f"{args.images_dir}/{image_file_name}", cv2.IMREAD_UNCHANGED)
+        flow_height, flow_width = flow.shape[1:3]
 
-    image_height, image_width = image.shape[0:2]
+        # Just need to find the top and left coordinates of the flow field
+        top = random.randint(0, flow_height - args.flow_crop_height)
+        left = random.randint(0, flow_width - args.flow_crop_width)
+        # print(f"top: {top}, left: {left}")
 
-    index = 1
-    if image_height >= args.image_size and image_width >= args.image_size:
-        for pos_y in range(0, image_height - args.image_size + 1, args.step):
-            for pos_x in range(0, image_width - args.image_size + 1, args.step):
-                # Crop
-                crop_image = image[pos_y: pos_y + args.image_size, pos_x:pos_x + args.image_size, ...]
-                crop_image = np.ascontiguousarray(crop_image)
-                # Save image
-                cv2.imwrite(f"{args.output_dir}/{image_file_name.split('.')[-2]}_{index:04d}.{image_file_name.split('.')[-1]}", crop_image)
+        # Crop flow field patch
+        crop_flow = flow[:, top:top + args.flow_crop_height, left:left + args.flow_crop_width]
+        crop_flow = np.ascontiguousarray(crop_flow)
 
-                index += 1
+        # Save flow field file, Continue to use the original file name
+        output_file_path = os.path.join(args.output_dir, flow_file_name).__str__()
+        np.save(output_file_path, crop_flow)
+
+    except Exception as e:
+        print(f"Error processing {flow_file_name}: {e}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare database scripts.")
-    parser.add_argument("--images_dir", type=str, help="Path to input image directory.")
-    parser.add_argument("--output_dir", type=str, help="Path to generator image directory.")
-    parser.add_argument("--image_size", type=int, help="Low-resolution image size from raw image.")
-    parser.add_argument("--step", type=int, help="Crop image similar to sliding window.")
+    parser.add_argument("--dataset_dir", type=str,
+                        help="Path to input image directory.")
+    parser.add_argument("--output_dir", type=str,
+                        help="Path to generator image directory.")
+
+    parser.add_argument("--flow_crop_height", type=int,
+                        help="Low-resolution raw Flow field distribution height.")
+    parser.add_argument("--flow_crop_width", type=int,
+                        help="Low-resolution raw Flow field distribution width.")
+
+    parser.add_argument("--all_flow_conditions_used", action="store_true",
+                        help="If this flag is present, data from all flow conditions will be used. If absent, "
+                             "it's considered False.")
+    parser.set_defaults(all_flow_conditions_used=False)
+
+    # parser.add_argument("--step", type=int, help="Crop image similar to sliding window.")
     parser.add_argument("--num_workers", type=int, help="How many threads to open at the same time.")
+
     args = parser.parse_args()
 
     main(args)

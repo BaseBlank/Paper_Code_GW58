@@ -15,7 +15,7 @@ import sys
 sys.path.append('F:\\Code\\RDN')
 # sys模块打印当前的系统目录
 print(sys.path)
-from imgproc import image_resize
+from imgproc import imresize
 
 
 # 调用上一级目录的config.py程序的中的upscale_factor参数
@@ -42,7 +42,7 @@ def extract_data(args):
         file_path = args.folder_path_input + '/' + dat_file_name
         data_3D_original = np.load(file_path).astype(np.float32)
         data_3D_cropped = data_3D_original[1:57, 1:29, :]  # shape = (56, 28, 3)
-        data_3D_lr = image_resize(data_3D_cropped, 1 / config.upscale_factor)  # [H,W,C]
+        data_3D_lr = imresize(data_3D_cropped, 1 / config.upscale_factor)  # [H,W,C]
 
         Num_tag = os.path.splitext(dat_file_name.split('_')[1])[0]
 

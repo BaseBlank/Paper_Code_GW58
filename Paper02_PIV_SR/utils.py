@@ -1,5 +1,5 @@
 """
-Ultimate ownership of all code in the repository belongs to this repository owner@BaseBlank of github.
+Ultimate ownership of all code in the repository belongs to this repository owner@BaseBlank of GitHub.
 This code repository is subject to AGPL-3.0, and to use this project code you must also comply with AGPL-3.0.
 About the specific content of AGPL - 3.0 protocol, you can refer to the following link:
     https://www.gnu.org/licenses/agpl-3.0.en.html

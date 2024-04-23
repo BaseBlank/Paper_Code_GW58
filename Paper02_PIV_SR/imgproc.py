@@ -8,137 +8,411 @@ The link to the reference code repository is as follows:
     https://github.com/Lornatang/RDN-PyTorch
 """
 # ==============================================================================
-import math
 import random
 from typing import Any, Tuple
-
 import math
-import sys
-import time
 import cv2
 import numpy as np
-import torch
 from numpy import ndarray
+import torch
 from torch import Tensor
 
 __all__ = [
     "image_to_tensor", "tensor_to_image",
-    "image_resize", "preprocess_one_image",
+    "imresize", "preprocess_one_image",
     "expand_y", "rgb_to_ycbcr", "bgr_to_ycbcr", "ycbcr_to_bgr", "ycbcr_to_rgb",
     "rgb_to_ycbcr_torch", "bgr_to_ycbcr_torch",
     "center_crop", "random_crop", "random_rotate", "random_vertically_flip", "random_horizontally_flip",
 ]
 
 
-# Code reference `https://github.com/xinntao/BasicSR/blob/master/basicsr/utils/matlab_functions.py`
-# 插值核
-def _cubic(x: Any) -> Any:
-    """Implementation of `cubic` function in Matlab under Python language.
+# reference: stackoverflow, how to perform max/mean pooling on a 2d array using numpy
+# reference: https://stackoverflow.com/questions/42463172/how-to-perform-max-mean-pooling-on-a-2d-array-using-numpy
+def pooling(mat, ksize, method='max', pad=False):
+    """
+    Non-overlapping pooling on 2D or 3D data.
+
+    <mat>: ndarray, input array to pool.
+    <ksize>: tuple of 2, kernel size in (ky, kx).
+    <method>: str, 'max for max-pooling,
+                   'mean' for mean-pooling.
+    <pad>: bool, pad <mat> or not. If no pad, output has size
+           n//f, n being <mat> size, f being kernel size.
+           if pad, output has size ceil(n/f).
+
+    Return <result>: pooled matrix.
+    """
+
+    m, n = mat.shape[:2]
+    ky, kx = ksize
+
+    _ceil = lambda x, y: int(np.ceil(x / float(y)))
+
+    if pad:
+        ny = _ceil(m, ky)
+        nx = _ceil(n, kx)
+        size = (ny * ky, nx * kx) + mat.shape[2:]
+        mat_pad = np.full(size, np.nan)
+        mat_pad[:m, :n, ...] = mat
+    else:
+        ny = m // ky
+        nx = n // kx
+        mat_pad = mat[:ny * ky, :nx * kx, ...]
+
+    new_shape = (ny, ky, nx, kx) + mat.shape[2:]
+
+    if method == 'max':
+        result = np.nanmax(mat_pad.reshape(new_shape), axis=(1, 3))
+    else:
+        result = np.nanmean(mat_pad.reshape(new_shape), axis=(1, 3))
+
+    return result
+
+
+def asStride(arr, sub_shape, stride):
+    """
+    Get a strided sub-matrices view of an ndarray.
+    See also skimage.util.shape.view_as_windows()
+    """
+    s0, s1 = arr.strides[:2]
+    m1, n1 = arr.shape[:2]
+    m2, n2 = sub_shape
+    view_shape = (1 + (m1 - m2) // stride[0], 1 + (n1 - n2) // stride[1], m2, n2) + arr.shape[2:]
+    strides = (stride[0] * s0, stride[1] * s1, s0, s1) + arr.strides[2:]
+    subs = np.lib.stride_tricks.as_strided(arr, view_shape, strides=strides)
+    return subs
+
+
+def poolingOverlap(mat, ksize, stride=None, method='max', pad=False):
+    """
+    Overlapping pooling on 2D or 3D data.
+
+    <mat>: ndarray, input array to pool.
+    <ksize>: tuple of 2, kernel size in (ky, kx).
+    <stride>: tuple of 2 or None, stride of pooling window.
+              If None, same as <ksize> (non-overlapping pooling).
+    <method>: str, 'max for max-pooling,
+                   'mean' for mean-pooling.
+    <pad>: bool, pad <mat> or not.
+           If no pad, output has size (n-f)//s+1, n being <mat> size, f being kernel size, s stride.
+           if pad, output has size ceil(n/s).
+
+    Return <result>: pooled matrix.
+    """
+
+    m, n = mat.shape[:2]
+    ky, kx = ksize
+    if stride is None:
+        stride = (ky, kx)
+    sy, sx = stride
+
+    _ceil = lambda x, y: int(np.ceil(x / float(y)))
+
+    if pad:
+        ny = _ceil(m, sy)
+        nx = _ceil(n, sx)
+        size = ((ny - 1) * sy + ky, (nx - 1) * sx + kx) + mat.shape[2:]
+        mat_pad = np.full(size, np.nan)
+        mat_pad[:m, :n, ...] = mat
+    else:
+        mat_pad = mat[:(m - ky) // sy * sy + ky, :(n - kx) // sx * sx + kx, ...]
+
+    view = asStride(mat_pad, ksize, stride)
+
+    if method == 'max':
+        result = np.nanmax(view, axis=(2, 3))
+    else:
+        result = np.nanmean(view, axis=(2, 3))
+
+    return result
+
+
+def poolingOverlap3D(arr3d, ksize, stride=None, method='max', pad=False):
+    """
+    Perform overlapping pooling on a 3D numpy array.
 
     Args:
-        x: Element vector.
+        arr3d (numpy.ndarray): 3D input array with shape (3, m, n).
+        ksize (tuple): Kernel size in (ky, kx).
+        stride (tuple, optional): Stride of pooling window. If None, same as ksize (non-overlapping pooling).
+        method (str, optional): Pooling method, 'max' for max-pooling, 'mean' for mean-pooling.
+        pad (bool, optional): Whether to pad the input array or not.
 
     Returns:
-        Bicubic interpolation
-
+        numpy.ndarray: 3D output array with shape (3, m', n'), where m' and n' depend on the pooling parameters.
     """
-    absx = torch.abs(x)
-    absx2 = absx ** 2
-    absx3 = absx ** 3
-    # tensor1.type_as(tensor2)将tensor1的数据类型转换为tensor2的数据类型
-    # 分段函数计算，(absx <= 1)与((absx > 1) * (absx <= 2))返回的是布尔值True或False，
-    # True * False = 0，True * True = 1，True = 1, False = 0
-    # Python把0、空字符串''和None看成 False，其他数值和非空字符串都看成 True，
-    # x <= 1，计算结果为：(1.5 * absx3 - 2.5 * absx2 + 1)
-    # (x > 1) * (x <= 2)，计算结果为：(-0.5 * absx3 + 2.5 * absx2 - 4 * absx + 2)
-    # x在其余范围内，结算结果，直接为0
-    # 这里是自定义双三次插值的内核，这个内核可以修改，现在用的是matlab默认的内核。a=-0.5
-    return (1.5 * absx3 - 2.5 * absx2 + 1) * ((absx <= 1).type_as(absx)) + (
-            -0.5 * absx3 + 2.5 * absx2 - 4 * absx + 2) * (
-               ((absx > 1) * (absx <= 2)).type_as(absx))
+    pooled_2d = []
+    for i in range(arr3d.shape[0]):
+        pooled_2d.append(poolingOverlap(arr3d[i, :, :], ksize, stride, method, pad))
+
+    return np.stack(pooled_2d, axis=0)
 
 
 # Code reference `https://github.com/xinntao/BasicSR/blob/master/basicsr/utils/matlab_functions.py`
-def _calculate_weights_indices(in_length: int,
-                               out_length: int,
-                               scale: float,
-                               kernel_width: int,
-                               antialiasing: bool) -> [np.ndarray, np.ndarray, int, int]:
-    """Implementation of `calculate_weights_indices` function in Matlab under Python language.
+# 插值核
+def cubic(x):
+    """cubic function used for calculate_weights_indices."""
+    absx = torch.abs(x)
+    absx2 = absx**2
+    absx3 = absx**3
+    return (1.5 * absx3 - 2.5 * absx2 + 1) * (
+        (absx <= 1).type_as(absx)) + (-0.5 * absx3 + 2.5 * absx2 - 4 * absx + 2) * (((absx > 1) *
+                                                                                     (absx <= 2)).type_as(absx))
+
+
+def calculate_weights_indices(in_length, out_length, scale, kernel, kernel_width, antialiasing):
+    """Calculate weights and indices, used for imresize function.
 
     Args:
         in_length (int): Input length.
         out_length (int): Output length.
         scale (float): Scale factor.
         kernel_width (int): Kernel width.
-        antialiasing (bool): Whether to apply antialiasing when down-sampling operations.
-            Caution: Bicubic down-sampling in PIL uses antialiasing by default.
-
-    Returns:
-       weights, indices, sym_len_s, sym_len_e
-
+        antialisaing (bool): Whether to apply anti-aliasing when downsampling.
     """
+
     if (scale < 1) and antialiasing:
         # Use a modified kernel (larger kernel width) to simultaneously
-        # interpolate and antialiasing
+        # interpolate and antialias
         kernel_width = kernel_width / scale
 
     # Output-space coordinates
     x = torch.linspace(1, out_length, out_length)
 
     # Input-space coordinates. Calculate the inverse mapping such that 0.5
-    # in output space maps to 0.5 in input space, and 0.5 + scale in output space maps to 1.5 in input space.
-    # 计算逆映射，使输出空间中的0.5映射到输入空间中的1.5，输出空间中0.5+比例映射到输入区域中的1.5。
-    # scale定后，就是一个线性map，u----->f(scale)------->x
+    # in output space maps to 0.5 in input space, and 0.5 + scale in output
+    # space maps to 1.5 in input space.
     u = x / scale + 0.5 * (1 - 1 / scale)
 
     # What is the left-most pixel that can be involved in the computation?
     left = torch.floor(u - kernel_width / 2)
 
-    # What is the maximum number of pixels that can be involved in the computation?
-    # Note: it's OK to use an extra pixel here; if the corresponding weights are all zero, it will be eliminated at the end of this function.
-    # math.ceil：向上取整
+    # What is the maximum number of pixels that can be involved in the
+    # computation?  Note: it's OK to use an extra pixel here; if the
+    # corresponding weights are all zero, it will be eliminated at the end
+    # of this function.
     p = math.ceil(kernel_width) + 2
 
-    # The indices of the input pixels involved in computing the k-th output pixel are in row k of the indices matrix.
-    # 返回一个二维索引向量，shape:[out_length, p]
+    # The indices of the input pixels involved in computing the k-th output
+    # pixel are in row k of the indices matrix.
     indices = left.view(out_length, 1).expand(out_length, p) + torch.linspace(0, p - 1, p).view(1, p).expand(
         out_length, p)
 
-    # The weights used to compute the k-th output pixel are in row k of the weights matrix.
+    # The weights used to compute the k-th output pixel are in row k of the
+    # weights matrix.
     distance_to_center = u.view(out_length, 1).expand(out_length, p) - indices
 
     # apply cubic kernel
     if (scale < 1) and antialiasing:
-        weights = scale * _cubic(distance_to_center * scale)
+        weights = scale * cubic(distance_to_center * scale)
     else:
-        weights = _cubic(distance_to_center)
+        weights = cubic(distance_to_center)
 
     # Normalize the weights matrix so that each row sums to 1.
     weights_sum = torch.sum(weights, 1).view(out_length, 1)
     weights = weights / weights_sum.expand(out_length, p)
 
-    # If a column in weights is all zero, get rid of it. only consider the first and last column.
+    # If a column in weights is all zero, get rid of it. only consider the
+    # first and last column.
     weights_zero_tmp = torch.sum((weights == 0), 0)
-    # math.isclose() 方法返回用于检查两个值是否彼此接近，如果值接近，则返回 True，否则返回 False
-    # math.isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0)
-    # abs(a-b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
     if not math.isclose(weights_zero_tmp[0], 0, rel_tol=1e-6):
         indices = indices.narrow(1, 1, p - 2)
         weights = weights.narrow(1, 1, p - 2)
     if not math.isclose(weights_zero_tmp[-1], 0, rel_tol=1e-6):
         indices = indices.narrow(1, 0, p - 2)
         weights = weights.narrow(1, 0, p - 2)
-    # https://blog.csdn.net/kdongyi/article/details/108180250
-    # 当调用contiguous()时，会强制拷贝一份tensor，让它的布局和从头创建的一模一样，但是两个tensor完全没有联系。
-    # 假如weights = torch.transpose(indices)，除了transpose(), 类似的操作还有narrow(), view(), expand()
-    # 不会由于weights是contiguous的，weights指向indices，修改weights的同时也会修改indices
     weights = weights.contiguous()
     indices = indices.contiguous()
     sym_len_s = -indices.min() + 1
     sym_len_e = indices.max() - in_length
     indices = indices + sym_len_s - 1
     return weights, indices, int(sym_len_s), int(sym_len_e)
+
+
+@torch.no_grad()
+def imresize(img, scale, antialiasing=True):
+    """imresize function same as MATLAB.
+
+    It now only supports bicubic.
+    The same scale applies for both height and width.
+
+    Args:
+        img (Tensor | Numpy array):
+            Tensor: Input image with shape (c, h, w), [0, 1] range.
+            Numpy: Input image with shape (h, w, c), [0, 1] range.
+        scale (float): Scale factor. The same scale applies for both height
+            and width.
+        antialisaing (bool): Whether to apply anti-aliasing when downsampling.
+            Default: True.
+
+    Returns:
+        Tensor: Output image with shape (c, h, w), [0, 1] range, w/o round.
+    """
+    squeeze_flag = False
+    if type(img).__module__ == np.__name__:  # numpy type
+        numpy_type = True
+        if img.ndim == 2:
+            img = img[:, :, None]
+            squeeze_flag = True
+        img = torch.from_numpy(img.transpose(2, 0, 1)).float()
+    else:
+        numpy_type = False
+        if img.ndim == 2:
+            img = img.unsqueeze(0)
+            squeeze_flag = True
+
+    in_c, in_h, in_w = img.size()
+    out_h, out_w = math.ceil(in_h * scale), math.ceil(in_w * scale)
+    kernel_width = 4
+    kernel = 'cubic'
+
+    # get weights and indices
+    weights_h, indices_h, sym_len_hs, sym_len_he = calculate_weights_indices(in_h, out_h, scale, kernel, kernel_width,
+                                                                             antialiasing)
+    weights_w, indices_w, sym_len_ws, sym_len_we = calculate_weights_indices(in_w, out_w, scale, kernel, kernel_width,
+                                                                             antialiasing)
+    # process H dimension
+    # symmetric copying
+    img_aug = torch.FloatTensor(in_c, in_h + sym_len_hs + sym_len_he, in_w)
+    img_aug.narrow(1, sym_len_hs, in_h).copy_(img)
+
+    sym_patch = img[:, :sym_len_hs, :]
+    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(1, inv_idx)
+    img_aug.narrow(1, 0, sym_len_hs).copy_(sym_patch_inv)
+
+    sym_patch = img[:, -sym_len_he:, :]
+    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(1, inv_idx)
+    img_aug.narrow(1, sym_len_hs + in_h, sym_len_he).copy_(sym_patch_inv)
+
+    out_1 = torch.FloatTensor(in_c, out_h, in_w)
+    kernel_width = weights_h.size(1)
+    for i in range(out_h):
+        idx = int(indices_h[i][0])
+        for j in range(in_c):
+            out_1[j, i, :] = img_aug[j, idx:idx + kernel_width, :].transpose(0, 1).mv(weights_h[i])
+
+    # process W dimension
+    # symmetric copying
+    out_1_aug = torch.FloatTensor(in_c, out_h, in_w + sym_len_ws + sym_len_we)
+    out_1_aug.narrow(2, sym_len_ws, in_w).copy_(out_1)
+
+    sym_patch = out_1[:, :, :sym_len_ws]
+    inv_idx = torch.arange(sym_patch.size(2) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(2, inv_idx)
+    out_1_aug.narrow(2, 0, sym_len_ws).copy_(sym_patch_inv)
+
+    sym_patch = out_1[:, :, -sym_len_we:]
+    inv_idx = torch.arange(sym_patch.size(2) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(2, inv_idx)
+    out_1_aug.narrow(2, sym_len_ws + in_w, sym_len_we).copy_(sym_patch_inv)
+
+    out_2 = torch.FloatTensor(in_c, out_h, out_w)
+    kernel_width = weights_w.size(1)
+    for i in range(out_w):
+        idx = int(indices_w[i][0])
+        for j in range(in_c):
+            out_2[j, :, i] = out_1_aug[j, :, idx:idx + kernel_width].mv(weights_w[i])
+
+    if squeeze_flag:
+        out_2 = out_2.squeeze(0)
+    if numpy_type:
+        out_2 = out_2.numpy()
+        if not squeeze_flag:
+            out_2 = out_2.transpose(1, 2, 0)
+
+    return out_2
+
+
+def imresize3D(img, scale, antialiasing=True):
+    """
+        Perform overlapping imresize on a 3D numpy array.
+
+        Args:
+            img (numpy.ndarray): 3D input array with shape (3, m, n).
+            scale (float): Scale factor.
+            antialiasing (bool): Whether to apply anti-aliasing when downsampling.
+        Returns:
+            numpy.ndarray: 3D output array with shape (3, m', n'), where m' and n' depend on the pooling parameters.
+    """
+    out_2d = []
+    for i in range(img.shape[0]):
+        out_2d.append(imresize(img[i, :, :], scale, antialiasing))
+
+    return np.stack(out_2d, axis=0)
+
+
+def bgr_to_ycbcr(image: np.ndarray, only_use_y_channel: bool) -> np.ndarray:
+    """Implementation of bgr2ycbcr function in Matlab under Python language.
+
+    Args:
+        image (np.ndarray): Image input in BGR format
+        only_use_y_channel (bool): Extract Y channel separately
+
+    Returns:
+        image (np.ndarray): YCbCr image array data
+
+    """
+    if only_use_y_channel:
+        image = np.dot(image, [24.966, 128.553, 65.481]) + 16.0
+    else:
+        image = np.matmul(image, [[24.966, 112.0, -18.214], [128.553, -74.203, -93.786], [65.481, -37.797, 112.0]]) + [
+            16, 128, 128]
+
+    image /= 255.
+    image = image.astype(np.float32)
+
+    return image
+
+
+def rgb_to_ycbcr(image: np.ndarray, only_use_y_channel: bool) -> np.ndarray:
+    """Implementation of rgb2ycbcr function in Matlab under Python language
+
+    Args:
+        image (np.ndarray): Image input in RGB format.
+        only_use_y_channel (bool): Extract Y channel separately
+
+    Returns:
+        image (np.ndarray): YCbCr image array data
+
+    """
+    if only_use_y_channel:
+        image = np.dot(image, [65.481, 128.553, 24.966]) + 16.0
+    else:
+        image = np.matmul(image, [[65.481, -37.797, 112.0], [128.553, -74.203, -93.786], [24.966, 112.0, -18.214]]) + [
+            16, 128, 128]
+
+    image /= 255.
+    image = image.astype(np.float32)
+
+    return image
+
+
+def expand_y(image: np.ndarray) -> np.ndarray:
+    """Convert BGR channel to YCbCr format,
+    and expand Y channel data in YCbCr, from HW to HWC
+
+    Args:
+        image (np.ndarray): Y channel image data
+
+    Returns:
+        y_image (np.ndarray): Y-channel image data in HWC form
+
+    """
+    # Normalize image data to [0, 1]
+    image = image.astype(np.float32) / 255.
+
+    # Convert BGR to YCbCr, and extract only Y channel
+    y_image = bgr_to_ycbcr(image, only_use_y_channel=True)
+
+    # Expand Y channel
+    y_image = y_image[..., None]
+
+    # Normalize the image data to [0, 255]
+    y_image = y_image.astype(np.float64) * 255.0
+
+    return y_image
 
 
 def image_to_tensor(image: ndarray, range_norm: bool, half: bool) -> Tensor:
@@ -232,275 +506,8 @@ def preprocess_one_data(image_path: str, device: torch.device) -> Tuple[Any, nda
     return tensor, max_value, min_value
 
 
-# Code reference `https://github.com/xinntao/BasicSR/blob/master/basicsr/utils/matlab_functions.py`
-def image_resize(image: Any, scale_factor: float, antialiasing: bool = True) -> Any:
-    """Implementation of `imresize` function in Matlab under Python language.
-
-    Args:
-        image: The input image.
-        scale_factor (float): Scale factor. The same scale applies for both height and width.
-        antialiasing (bool): Whether to apply antialiasing when down-sampling operations.
-            Caution: Bicubic down-sampling in `PIL` uses antialiasing by default. Default: ``True``.
-
-    Returns:
-        out_2 (np.ndarray): Output image with shape (c, h, w), [0, 1] range, w/o round
-
-    """
-    squeeze_flag = False
-    if type(image).__module__ == np.__name__:  # numpy type
-        numpy_type = True
-        if image.ndim == 2:
-            image = image[:, :, None]
-            squeeze_flag = True
-        image = torch.from_numpy(image.transpose(2, 0, 1)).float()  # 将通道数维度，调到最前
-    else:
-        numpy_type = False
-        if image.ndim == 2:
-            image = image.unsqueeze(0)  # pytorch的起升维的作用，0表示在张量最外层加一个中括号变成第一维
-            squeeze_flag = True
-
-    in_c, in_h, in_w = image.size()
-    out_h, out_w = math.ceil(in_h * scale_factor), math.ceil(in_w * scale_factor)
-    kernel_width = 4
-
-    # get weights and indices
-    weights_h, indices_h, sym_len_hs, sym_len_he = _calculate_weights_indices(in_h, out_h, scale_factor, kernel_width,
-                                                                              antialiasing)
-    weights_w, indices_w, sym_len_ws, sym_len_we = _calculate_weights_indices(in_w, out_w, scale_factor, kernel_width,
-                                                                              antialiasing)
-    # process H dimension
-    # symmetric copying，对称复制
-    img_aug = torch.FloatTensor(in_c, in_h + sym_len_hs + sym_len_he, in_w)  # 32位，“全0”张量
-    img_aug.narrow(1, sym_len_hs, in_h).copy_(
-        image)  # 在in_c个通道上都进行img_aug的[in_c, sym_len_hs:sym_len_hs+in_h, in_w]的部分被image替换的操作
-
-    sym_patch = image[:, :sym_len_hs, :]
-    inv_idx = torch.arange(sym_patch.size(1) - 1, -1,
-                           -1).long()  # torch.arange(start=0, end, step) → 一维Tensor，tensor[sym_patch.size(1)-1,sym_patch.size(1)-2,...0]
-    sym_patch_inv = sym_patch.index_select(1,
-                                           inv_idx)  # index_select索引函数，1是维度，inv_idx是索引号。sym_patch_inv就是sym_patch在维度1上翻转对称
-    img_aug.narrow(1, 0, sym_len_hs).copy_(sym_patch_inv)
-
-    sym_patch = image[:, -sym_len_he:, :]
-    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
-    sym_patch_inv = sym_patch.index_select(1, inv_idx)
-    img_aug.narrow(1, sym_len_hs + in_h, sym_len_he).copy_(sym_patch_inv)
-
-    # 至此，img_aug三部分分别赋值完成，其主体由image全部或image各部分赋值构成
-
-    out_1 = torch.FloatTensor(in_c, out_h, in_w)
-    kernel_width = weights_h.size(1)
-    for i in range(out_h):
-        idx = int(indices_h[i][0])
-        for j in range(in_c):
-            # 索引出一个二维矩阵------>转置-------->和一个权重向量运算
-            # img_aug, shape, [in_c, sym_len_hs + in_h + sym_len_he, in_w]
-            # out_1,   shape, [in_c, out_h, in_w]
-            # indices, shape, [out_length, p-2]
-            # weights, shape, [out_length, p-2]
-            out_1[j, i, :] = img_aug[j, idx:idx + kernel_width, :].transpose(0, 1).mv(weights_h[i])
-
-    # process W dimension
-    # symmetric copying
-    out_1_aug = torch.FloatTensor(in_c, out_h, in_w + sym_len_ws + sym_len_we)
-    out_1_aug.narrow(2, sym_len_ws, in_w).copy_(out_1)
-
-    sym_patch = out_1[:, :, :sym_len_ws]
-    inv_idx = torch.arange(sym_patch.size(2) - 1, -1, -1).long()
-    sym_patch_inv = sym_patch.index_select(2, inv_idx)
-    out_1_aug.narrow(2, 0, sym_len_ws).copy_(sym_patch_inv)
-
-    sym_patch = out_1[:, :, -sym_len_we:]
-    inv_idx = torch.arange(sym_patch.size(2) - 1, -1, -1).long()
-    sym_patch_inv = sym_patch.index_select(2, inv_idx)
-    out_1_aug.narrow(2, sym_len_ws + in_w, sym_len_we).copy_(sym_patch_inv)
-
-    out_2 = torch.FloatTensor(in_c, out_h, out_w)
-    kernel_width = weights_w.size(1)
-    for i in range(out_w):
-        idx = int(indices_w[i][0])
-        for j in range(in_c):
-            out_2[j, :, i] = out_1_aug[j, :, idx:idx + kernel_width].mv(weights_w[i])
-
-    # ==================squeeze_flag是 False=============================
-    if squeeze_flag:
-        out_2 = out_2.squeeze(0)  # 指定维度上，若该维度的维数为1，则删除该指定维度。（删除一个张量中所有维数为1的维度）
-    if numpy_type:
-        out_2 = out_2.numpy()  # tensor转numpy数组；https://xujinzh.github.io/2022/03/25/pytorch-tensor-to-numpy-array-and-back/
-        if not squeeze_flag:
-            out_2 = out_2.transpose(1, 2, 0)
-
-    return out_2
 
 
-# Bicubic
-# 输入的维度必须是三维，二维数组要升维
-# 这个是不改变原始值的
-# Interpolation kernel
-def u(s, a):
-    if (abs(s) >= 0) & (abs(s) <= 1):
-        return (a + 2) * (abs(s) ** 3) - (a + 3) * (abs(s) ** 2) + 1
-    elif (abs(s) > 1) & (abs(s) <= 2):
-        return a * (abs(s) ** 3) - (5 * a) * (abs(s) ** 2) + (8 * a) * abs(s) - 4 * a
-    return 0
-
-
-# Paddnig
-def padding(img, H, W, C):
-    zimg = np.zeros((H + 4, W + 4, C))
-    zimg[2:H + 2, 2:W + 2, :C] = img
-
-    # Pad the first/last two col and row
-    zimg[2:H + 2, 0:2, :C] = img[:, 0:1, :C]
-    zimg[H + 2:H + 4, 2:W + 2, :] = img[H - 1:H, :, :]
-    zimg[2:H + 2, W + 2:W + 4, :] = img[:, W - 1:W, :]
-    zimg[0:2, 2:W + 2, :C] = img[0:1, :, :C]
-    # Pad the missing eight points
-
-    zimg[0:2, 0:2, :C] = img[0, 0, :C]
-    zimg[H + 2:H + 4, 0:2, :C] = img[H - 1, 0, :C]
-    zimg[H + 2:H + 4, W + 2:W + 4, :C] = img[H - 1, W - 1, :C]
-    zimg[0:2, W + 2:W + 4, :C] = img[0, W - 1, :C]
-    return zimg
-
-
-# https://github.com/yunabe/codelab/blob/master/misc/terminal_progressbar/progress.py
-def get_progressbar_str(progress):
-    END = 170
-    MAX_LEN = 30
-    BAR_LEN = int(MAX_LEN * progress)
-    return ('Progress:[' + '=' * BAR_LEN +
-            ('>' if BAR_LEN < MAX_LEN else '') +
-            ' ' * (MAX_LEN - BAR_LEN) +
-            '] %.1f%%' % (progress * 100.))
-
-
-# Bicubic operation
-def bicubic(img, ratio, a, squeeze_flag=False):
-    # Get image size
-    if img.ndim == 2:
-        img = img[:, :, None]
-    H, W, C = img.shape
-
-    img = padding(img, H, W, C)
-    # Create new image
-    dH = math.floor(H * ratio)
-    dW = math.floor(W * ratio)
-    dst = np.zeros((dH, dW, 3))
-
-    h = 1 / ratio
-
-    # print('Start bicubic interpolation')
-    # print('It will take a little while...')
-    inc = 0
-    for c in range(C):
-        for j in range(dH):
-            for i in range(dW):
-                x, y = i * h + 2, j * h + 2
-
-                x1 = 1 + x - math.floor(x)
-                x2 = x - math.floor(x)
-                x3 = math.floor(x) + 1 - x
-                x4 = math.floor(x) + 2 - x
-
-                y1 = 1 + y - math.floor(y)
-                y2 = y - math.floor(y)
-                y3 = math.floor(y) + 1 - y
-                y4 = math.floor(y) + 2 - y
-
-                mat_l = np.matrix([[u(x1, a), u(x2, a), u(x3, a), u(x4, a)]])
-                mat_m = np.matrix([[img[int(y - y1), int(x - x1), c], img[int(y - y2), int(x - x1), c],
-                                    img[int(y + y3), int(x - x1), c], img[int(y + y4), int(x - x1), c]],
-                                   [img[int(y - y1), int(x - x2), c], img[int(y - y2), int(x - x2), c],
-                                    img[int(y + y3), int(x - x2), c], img[int(y + y4), int(x - x2), c]],
-                                   [img[int(y - y1), int(x + x3), c], img[int(y - y2), int(x + x3), c],
-                                    img[int(y + y3), int(x + x3), c], img[int(y + y4), int(x + x3), c]],
-                                   [img[int(y - y1), int(x + x4), c], img[int(y - y2), int(x + x4), c],
-                                    img[int(y + y3), int(x + x4), c], img[int(y + y4), int(x + x4), c]]])
-                mat_r = np.matrix([[u(y1, a)], [u(y2, a)], [u(y3, a)], [u(y4, a)]])
-                dst[j, i, c] = np.dot(np.dot(mat_l, mat_m), mat_r)
-
-                # Print progress
-                inc = inc + 1
-                # sys.stderr.write('\r\033[K' + get_progressbar_str(inc/(C*dH*dW)))
-                sys.stderr.flush()
-    # sys.stderr.write('\n')
-    sys.stderr.flush()
-    if squeeze_flag:
-        dst = np.transpose(dst, axes=(2, 0, 1))
-    return dst
-
-
-def expand_y(image: np.ndarray) -> np.ndarray:
-    """Convert BGR channel to YCbCr format,
-    and expand Y channel data in YCbCr, from HW to HWC
-
-    Args:
-        image (np.ndarray): Y channel image data
-
-    Returns:
-        y_image (np.ndarray): Y-channel image data in HWC form
-
-    """
-    # Normalize image data to [0, 1]
-    image = image.astype(np.float32) / 255.
-
-    # Convert BGR to YCbCr, and extract only Y channel
-    y_image = bgr_to_ycbcr(image, only_use_y_channel=True)
-
-    # Expand Y channel
-    y_image = y_image[..., None]
-
-    # Normalize the image data to [0, 255]
-    y_image = y_image.astype(np.float64) * 255.0
-
-    return y_image
-
-
-def rgb_to_ycbcr(image: np.ndarray, only_use_y_channel: bool) -> np.ndarray:
-    """Implementation of rgb2ycbcr function in Matlab under Python language
-
-    Args:
-        image (np.ndarray): Image input in RGB format.
-        only_use_y_channel (bool): Extract Y channel separately
-
-    Returns:
-        image (np.ndarray): YCbCr image array data
-
-    """
-    if only_use_y_channel:
-        image = np.dot(image, [65.481, 128.553, 24.966]) + 16.0
-    else:
-        image = np.matmul(image, [[65.481, -37.797, 112.0], [128.553, -74.203, -93.786], [24.966, 112.0, -18.214]]) + [
-            16, 128, 128]
-
-    image /= 255.
-    image = image.astype(np.float32)
-
-    return image
-
-
-def bgr_to_ycbcr(image: np.ndarray, only_use_y_channel: bool) -> np.ndarray:
-    """Implementation of bgr2ycbcr function in Matlab under Python language.
-
-    Args:
-        image (np.ndarray): Image input in BGR format
-        only_use_y_channel (bool): Extract Y channel separately
-
-    Returns:
-        image (np.ndarray): YCbCr image array data
-
-    """
-    if only_use_y_channel:
-        image = np.dot(image, [24.966, 128.553, 65.481]) + 16.0
-    else:
-        image = np.matmul(image, [[24.966, 112.0, -18.214], [128.553, -74.203, -93.786], [65.481, -37.797, 112.0]]) + [
-            16, 128, 128]
-
-    image /= 255.
-    image = image.astype(np.float32)
-
-    return image
 
 
 def ycbcr_to_rgb(image: np.ndarray) -> np.ndarray:
@@ -839,5 +846,3 @@ def per_image_normalization(image):
     assert image.dtype == orig_dtype
 
     return image.astype(np.float32)
-
-

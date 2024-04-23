@@ -7,134 +7,167 @@ The code reference comes from Lornatang's DRRN-PyTorch code repository. Thanks a
 The link to the reference code repository is as follows:
     https://github.com/Lornatang/RDN-PyTorch
 """
-# ==============================================================================
-from typing import Dict
 
 """Realize the function of dataset preparation."""
+# ==============================================================================
+from typing import Dict
 import os
 import queue
 import threading
 
-import cv2
+import random
 import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
+from torch import cuda
+import core
 
 import imgproc
 
 __all__ = [
-    "TrainValidImageDataset", "TestImageDataset",
+    "TrainValidFlowDataset", "TestFlowDataset",
     "PrefetchGenerator", "PrefetchDataLoader", "CPUPrefetcher", "CUDAPrefetcher",
 ]
 
+# Load the maximum and minimum values saved locally.
+flow_max_final = np.loadtxt("data\\minimax\\flow_max_final.txt")
+flow_min_final = np.loadtxt("data\\minimax\\flow_min_final.txt")
+flow_max_final = flow_max_final[:, np.newaxis, np.newaxis]  # [C,] -> [C,1,1]
+flow_min_final = flow_min_final[:, np.newaxis, np.newaxis]
 
-class TrainValidImageDataset(Dataset):
+
+class TrainValidFlowDataset(Dataset):
     """Define training/valid dataset loading methods.
 
     Args:
         image_dir (str): Train/Valid dataset address.
-        gt_image_size_H (int): Ground-truth resolution image size H.
-        gt_image_size_W (int): Ground-truth resolution image size W.
-        upscale_factor (int): Image up scale factor.
+        gt_image_size_H (int): Ground-truth resolution flow field size H.
+        gt_image_size_W (int): Ground-truth resolution flow field size W.
+        upscale_factor (int): flow field upscale factor.
         mode (str): Data set loading method, the training data set is for data enhancement, and the
             verification dataset is not for data enhancement.
     """
 
     def __init__(
             self,
-            image_dir: str,
-            gt_image_size_H: int,
-            gt_image_size_W: int,
+            train_flow_dir: str,
+            gt_flow_size_H: int,
+            gt_flow_size_W: int,
             upscale_factor: int,
             mode: str,
+            random_method: str = 'random',
     ) -> None:
-        super(TrainValidImageDataset, self).__init__()
-        self.image_file_names = [os.path.join(image_dir, image_file_name) for image_file_name in os.listdir(image_dir)]
-        self.gt_image_size_H = gt_image_size_H
-        self.gt_image_size_W = gt_image_size_W
+        super(TrainValidFlowDataset, self).__init__()
+        self.flow_file_names = [os.path.join(train_flow_dir, flow_file_name) for flow_file_name in
+                                os.listdir(train_flow_dir)]
+        self.gt_flow_size_H = gt_flow_size_H
+        self.gt_flow_size_W = gt_flow_size_W
         self.upscale_factor = upscale_factor
         self.mode = mode
+        self.random_method = random_method
 
     def __getitem__(self, batch_index: int) -> [Dict[str, Tensor], Dict[str, Tensor]]:
-        # Read a batch of image data, [H, W, C]
-        # gt_image = cv2.imread(self.image_file_names[batch_index]).astype(np.float32) / 255.
-        gt_image = imgproc.per_image_normalization(np.load(self.image_file_names[batch_index])).astype(np.float32)
-        # Image processing operations
-        if self.mode == "Train":
-            # 之所以裁剪，是为了将不同缩放尺寸统一patch的大小
-            # 因为一个原始图像经过imgproc.imresize(lr_image, 1/upscale_factor)与imresize(lr_image, upscale_factor)后的大小，可能与原始大小差 +-1
-            gt_crop_image = imgproc.random_crop(gt_image, self.gt_image_size_H, self.gt_image_size_W)
-            # gt_crop_image = imgproc.crop_divide_exactly(gt_image)
-            # gt_crop_image = imgproc.random_rotate(gt_crop_image, [90, 180, 270])
-            # gt_crop_image = imgproc.random_horizontally_flip(gt_crop_image, 0.5)
-            # gt_crop_image = imgproc.random_vertically_flip(gt_crop_image, 0.5)
-        elif self.mode == "Valid":
-            # gt_crop_image = imgproc.crop_divide_exactly(gt_image)
-            gt_crop_image = imgproc.random_crop(gt_image, self.gt_image_size_H, self.gt_image_size_W)
+        # Read a batch of flow data, [C, H, W]
+        global lr_flow_normalize
+        gt_flow = np.load(self.flow_file_names[batch_index]).astype(np.float32)
+        # gt_flow_normalize = (gt_flow - flow_min_final) / (flow_max_final - flow_min_final)
+        gt_flow_normalize = (gt_flow[0:2, :, :] - flow_min_final[0:2, :, :]) / (flow_max_final[0:2, :, :] - flow_min_final[0:2, :, :])
+
+        # Set antialiasing to True according to the default setting of MATLAB's imresize function.
+        if self.random_method == 'random':
+            local_random_seed = batch_index * 7 + 13  # 使用任意与批次索引相关的值作为本地随机种子
+            random.seed(local_random_seed)  # 设置本地随机种子以保证每次迭代的随机选择独立于全局随机种子
+
+            use_pooling_choice = ['pool', 'gaussian', 'cubic', ]
+            use_pooling_method = random.choice(use_pooling_choice)
+
+            if use_pooling_method == 'pool':
+                lr_flow_normalize = (imgproc.poolingOverlap3D(arr3d=gt_flow_normalize,
+                                                              ksize=(self.upscale_factor, self.upscale_factor),
+                                                              stride=None,
+                                                              method='mean',
+                                                              pad=False))
+            elif use_pooling_method == 'gaussian':
+                gt_flow_normalize_tensor = torch.from_numpy(gt_flow_normalize)
+                if cuda.is_available():
+                    gt_flow_normalize_tensor = gt_flow_normalize_tensor.cuda()
+                lr_flow_normalize_tensor = core.imresize(gt_flow_normalize_tensor,
+                                                         scale=1 / self.upscale_factor,
+                                                         antialiasing=True,
+                                                         kernel='gaussian', sigma=1)
+                lr_flow_normalize = lr_flow_normalize_tensor.cpu().numpy()
+            elif use_pooling_method == 'cubic':
+                gt_flow_normalize_tensor = torch.from_numpy(gt_flow_normalize)
+                if cuda.is_available():
+                    gt_flow_normalize_tensor = gt_flow_normalize_tensor.cuda()
+                lr_flow_normalize_tensor = core.imresize(gt_flow_normalize_tensor,
+                                                         scale=1 / self.upscale_factor,
+                                                         antialiasing=True,
+                                                         kernel='cubic')
+                lr_flow_normalize = lr_flow_normalize_tensor.cpu().numpy()
+        elif self.random_method == 'pooling':
+            lr_flow_normalize = imgproc.poolingOverlap3D(arr3d=gt_flow_normalize,
+                                                         ksize=(self.upscale_factor, self.upscale_factor),
+                                                         stride=None,
+                                                         method='mean',
+                                                         pad=False)
+        elif self.random_method == 'resize_gaussian':
+            gt_flow_normalize_tensor = torch.from_numpy(gt_flow_normalize)
+            lr_flow_normalize_tensor = core.imresize(gt_flow_normalize_tensor,
+                                                     scale=1 / self.upscale_factor,
+                                                     antialiasing=True,
+                                                     kernel='gaussian', sigma=1)
+            lr_flow_normalize = lr_flow_normalize_tensor.cpu().numpy()
+
+        elif self.random_method == 'resize_cubic':
+            gt_flow_normalize_tensor = torch.from_numpy(gt_flow_normalize)
+            lr_flow_normalize_tensor = core.imresize(gt_flow_normalize_tensor,
+                                                     scale=1 / self.upscale_factor,
+                                                     antialiasing=True,
+                                                     kernel='cubic')
+            lr_flow_normalize = lr_flow_normalize_tensor.cpu().numpy()
         else:
-            raise ValueError("Unsupported data processing model, please use `Train` or `Valid`.")
+            raise ValueError("Invalid random_method. Options are 'random', 'resize' and 'pooling'.")
 
-        lr_crop_image = imgproc.image_resize(gt_crop_image, 1 / self.upscale_factor)  # [H,W,C]
-        # lr_crop_image = imgproc.bicubic(gt_crop_image, ratio=1 / self.upscale_factor, a=-0.5, squeeze_flag=False)
+        lr_flow_tensor_normalize = torch.from_numpy(np.ascontiguousarray(lr_flow_normalize)).float()  # [C, H, W]
+        gt_flow_tensor_normalize = torch.from_numpy(np.ascontiguousarray(gt_flow_normalize)).float()
 
-        # BGR convert RGB
-        # gt_crop_image = cv2.cvtColor(gt_crop_image, cv2.COLOR_BGR2RGB)
-        # lr_crop_image = cv2.cvtColor(lr_crop_image, cv2.COLOR_BGR2RGB)
-
-        # Convert image data into Tensor stream format (PyTorch).
-        # Note: The range of input and output is between [0, 1]
-        # image_to_tensor操作后，维度已经由[H,W,C]变为了[C,H,W]
-        gt_crop_tensor = imgproc.image_to_tensor(gt_crop_image, False, False)  # [H,W,C]变为了[C,H,W]
-        lr_crop_tensor = imgproc.image_to_tensor(lr_crop_image, False, False)
-
-        return {"gt": gt_crop_tensor, "lr": lr_crop_tensor}
+        return {"gt": gt_flow_tensor_normalize, "lr": lr_flow_tensor_normalize}
 
     def __len__(self) -> int:
-        return len(self.image_file_names)
+        return len(self.flow_file_names)
 
 
-class TestImageDataset(Dataset):
+class TestFlowDataset(Dataset):
     """Define Test dataset loading methods.
 
     Args:
-        test_gt_images_dir (str): ground truth image in test image
-        test_lr_images_dir (str): low-resolution image in test image
+        test_gt_flows_dir (str): ground truth flow field in test set
+        test_lr_flows_dir (str): low-resolution flow field in test set
     """
 
-    def __init__(self, test_gt_images_dir: str, test_lr_images_dir: str, upscale_factor: int, gt_image_size_H: int,
-                 gt_image_size_W: int, ) -> None:
-        super(TestImageDataset, self).__init__()
-        # Get all image file names in folder
-        self.upscale_factor = upscale_factor
-        self.gt_image_size_H = gt_image_size_H
-        self.gt_image_size_W = gt_image_size_W
-        self.gt_image_file_names = [os.path.join(test_gt_images_dir, x) for x in os.listdir(test_gt_images_dir)]
-        # self.lr_image_file_names = [os.path.join(test_lr_images_dir, x) for x in os.listdir(test_lr_images_dir)]
+    def __init__(self, test_gt_flows_dir: str, test_lr_flows_dir: str) -> None:
+        super(TestFlowDataset, self).__init__()
+        # Get all flow file names in folder
+        self.gt_flow_file_names = [os.path.join(test_gt_flows_dir, x) for x in os.listdir(test_gt_flows_dir)]
+        self.lr_flow_file_names = [os.path.join(test_lr_flows_dir, x) for x in os.listdir(test_lr_flows_dir)]
 
     def __getitem__(self, batch_index: int) -> [torch.Tensor, torch.Tensor]:
-        # Read a batch of image data
-        # gt_image = cv2.imread(self.gt_image_file_names[batch_index]).astype(np.float32) / 255.
-        gt_image = imgproc.per_image_normalization(np.load(self.gt_image_file_names[batch_index])).astype(np.float32)
-        # lr_image = cv2.imread(self.lr_image_file_names[batch_index]).astype(np.float32) / 255.
-        # lr_image = imgproc.per_image_normalization(np.load(self.lr_image_file_names[batch_index])).astype(np.float32)
+        # Read a batch of flow data
+        gt_flow = np.load(self.gt_flow_file_names[batch_index]).astype(np.float32)
+        lr_flow = np.load(self.lr_flow_file_names[batch_index]).astype(np.float32)
 
-        # BGR convert RGB
-        # gt_image = cv2.cvtColor(gt_image, cv2.COLOR_BGR2RGB)
-        # lr_image = cv2.cvtColor(lr_image, cv2.COLOR_BGR2RGB)
+        # gt_tensor = torch.from_numpy(np.ascontiguousarray(gt_flow)).float()  # [C, H, W]
+        # lr_tensor = torch.from_numpy(np.ascontiguousarray(lr_flow)).float()
 
-        # gt_image = imgproc.crop_divide_exactly(gt_image)
-        gt_crop_image = imgproc.random_crop(gt_image, self.gt_image_size_H, self.gt_image_size_W)
-        lr_image = imgproc.image_resize(gt_crop_image, 1 / self.upscale_factor)
-        # Convert image data into Tensor stream format (PyTorch).
-        # Note: The range of input and output is between [0, 1]
-        gt_tensor = imgproc.image_to_tensor(gt_crop_image, False, False)
-        lr_tensor = imgproc.image_to_tensor(lr_image, False, False)
+        gt_tensor = torch.from_numpy(np.ascontiguousarray(gt_flow[0:2, :, :])).float()  # [C, H, W]
+        lr_tensor = torch.from_numpy(np.ascontiguousarray(lr_flow[0:2, :, :])).float()
 
         return {"gt": gt_tensor, "lr": lr_tensor}
 
     def __len__(self) -> int:
-        return len(self.gt_image_file_names)
+        return len(self.gt_flow_file_names)
 
 
 # 原本 PyTorch 默认的 DataLoader 会创建一些 worker 线程来预读取新的数据，但是除非这些线程的数据全部都被清空，这些线程才会读下一批数据。

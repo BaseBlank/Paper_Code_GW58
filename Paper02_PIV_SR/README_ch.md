@@ -1,3 +1,7 @@
+
+
+
+
 **在进行模型train或者test的时候，一定要去config里调mode参数。**
 
 **在进行模型train或者test的时候，一定要去config里调mode参数。**
@@ -370,3 +374,407 @@ python sheet_to_matrix.py --folder_path_input F:/model_generator/No_Heating/cent
 python sheet_to_matrix.py --folder_path_input F:/model_generator/No_Heating/center_blockage_0.7/PSD/Re/V/one_dim_peak --folder_path_output F:/model_generator/No_Heating/center_blockage_0.7/PSD/Re/V/one_dim_peak_matrix --extracted_variable x --matrix_rows_num_Y 236 --matrix_cols_num_X 116 --variable_name VPSDpeakMatrix
 ```
 
+# 标准计算流程：
+
+# 一、数据预处理
+
+## 1.1 数据格式转换
+
+PIV计算导出tecplot文件，首先将二维的.dat文件转换为三维的类似图片像素排列的.npy数据；
+
+形成dataset文件夹
+
+`dat_format.py`
+
+```bash
+python ./scripts/dat_format.py --folder_path_input D:\\Code\\PIV_data\\flow1 --folder_path_output D:\\Code\\PIV_dataset\\dataset --variable_name PIV-1
+```
+
+```bash
+python ./scripts/dat_format.py --folder_path_input D:\\Code\\PIV_data\\flow2 --folder_path_output D:\\Code\\PIV_dataset\\dataset --variable_name PIV-2
+```
+
+`dat_format.py`中需要验证的部分
+
+|         代码中易错需要验证的部分         | 是否验证 |
+| :--------------------------------------: | :------: |
+|    三列数据到三通道矩阵像素数据的转换    |  已验证  |
+| 读取原始数据文件夹后文件进行排序是否正确 |  已验证  |
+
+## 1.2 数据集划分
+
+划分训练集、验证集与测试集
+
+形成train_dataset、validate_dataset、test_dataset三个文件夹。
+
+使用全部数据
+
+```bash
+python ./scripts/split_train_valid_dataset.py --raw_dataset_dir D:/Code/PIV_dataset/dataset --train_dataset_dir D:/Code/PIV_dataset/train_dataset --valid_dataset_dir D:/Code/PIV_dataset/validate_dataset --test_dataset_dir D:/Code/PIV_dataset/test_dataset --valid_samples_ratio 0.2 --test_samples_ratio 0.1 --all_flow_conditions_used
+```
+
+不使用全部数据
+
+```bash
+python ./scripts/split_train_valid_dataset.py --raw_dataset_dir D:/Code/PIV_dataset/dataset --train_dataset_dir D:/Code/PIV_dataset/train_dataset --valid_dataset_dir D:/Code/PIV_dataset/validate_dataset --test_dataset_dir D:/Code/PIV_dataset/test_dataset --valid_samples_ratio 0.2 --test_samples_ratio 0.1
+```
+
+## 1.3 数据shpae裁剪
+
+数据大小预处理
+
+形成train、validate、test三个文件夹。
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir D:/Code/PIV_dataset/train_dataset --output_dir D:/Code/PIV_dataset/train --flow_crop_height 44 --flow_crop_width 20 --all_flow_conditions_used --num_workers 4
+```
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir D:/Code/PIV_dataset/validate_dataset --output_dir D:/Code/PIV_dataset/validate --flow_crop_height 44 --flow_crop_width 20 --all_flow_conditions_used --num_workers 4
+```
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir D:/Code/PIV_dataset/test_dataset --output_dir D:/Code/PIV_dataset/test --flow_crop_height 44 --flow_crop_width 20 --all_flow_conditions_used --num_workers 4
+```
+
+
+
+## 1.4 归一化最值计算
+
+计算最大最小值，运行scripts/minimax_search.py。
+
+## 1.5 生成用于验证与测试的gt-lr数据对
+
+生成validate_lr、validate_gt、test_lr、test_gt四个文件夹；
+
+不执行归一化的话，validate_gt、test_gt两个文件夹与validate、test两个文件夹相同，执行归一化，那么validate_gt、test_gt两个文件夹就是validate、test两个文件夹的归一化版本。
+
+因为train的数据在Dataloader中直接成对的进行了resize，因此不需要要实现准备LR数据。
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir D:/Code/PIV_dataset/validate --lr_dir_normalize D:/Code/PIV_dataset/validate_lr --gt_dir_normalize D:/Code/PIV_dataset/validate_lr_gt --down_sampling_mode random --normalized_choice normalized_used --down_sampling_factor 4 --all_flow_conditions_used --num_workers 4
+```
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir D:/Code/PIV_dataset/test --lr_dir_normalize D:/Code/PIV_dataset/test_lr --gt_dir_normalize D:/Code/PIV_dataset/test_lr_gt --down_sampling_mode random --normalized_choice normalized_unused --down_sampling_factor 4 --all_flow_conditions_used --num_workers 4
+```
+
+## 二、计算输入通道修改
+
+需要修改的内容包括：
+
+dataset.py文件的两个数据加载函数；
+
+config.py文件的输入输出通道数配置；
+
+## 三、推理计算
+
+```bash
+python inference.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code/RDNopt/experimental_records/Single_flow_condition_20240328/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/test_lr --output_path F:/PIV_model_generate/PIV_dataset/test_lr_sr --upscale_factor 4 
+```
+
+推理计算数据
+
+```bash
+python inference.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code/RDNopt/experimental_records/Single_flow_condition_20240328/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/test_lr --output_path F:/PIV_model_generate/PIV_dataset/test_lr_sr --upscale_factor 4 
+```
+
+```bash
+python inference.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path D:/Code/RDNopt/results/rdn_large_x4-PIV/best.pth.tar --inputs_path D:/Code/PIV_dataset/test_lr --output_path D:/Code/PIV_dataset/test_lr_sr --upscale_factor 4 
+```
+
+
+
+## 计算后处理
+
+### **数学算法将LR数据上采样到SR数据**
+
+2D_matrix_interpolation.py
+
+```shell
+python post/test_interpolation.py --folder_path_input D:/Code/PIV_dataset/test_lr --folder_path_output D:/Code/PIV_dataset/test_lr_interpolation --interpolation_method random
+```
+
+
+
+三维数组到二维数组的转换
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input D:/Code/PIV_dataset/dataset --folder_path_output D:/Code/PIV_data/flow_2d
+```
+
+
+
+```bash
+python post/TKE_acquire.py --input_path D:/Code/PIV_dataset/dataset --output_path_pulsation D:/Code/PIV_dataset/dataset_pulsation --output_path_tke D:/Code/PIV_dataset/dataset_TKE
+```
+
+
+
+# 实际计算参数设置流程：
+
+# 一、数据预处理
+
+## 1.1 数据格式转换
+
+PIV计算导出tecplot文件，首先将二维的.dat文件转换为三维的类似图片像素排列的.npy数据；
+
+形成dataset文件夹
+
+`dat_format.py`
+
+`window_64_32-4000_0.324_downstream`文件夹，0.324的流动工况；
+
+```bash
+python ./scripts/dat_format.py --folder_path_input F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_64_32-4000_0.324_downstream/tecplot --folder_path_output F:/PIV_model_generate/PIV_dataset/dataset --variable_name PIV-1
+```
+
+`window_64_32-4000_0.27_downstream`文件夹，0.27的流动工况；
+
+```bash
+python ./scripts/dat_format.py --folder_path_input F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_64_32-4000_0.27_downstream/tecplot --folder_path_output F:/PIV_model_generate/PIV_dataset/dataset --variable_name PIV-2
+```
+
+`window_64_32-4000_0.162_downstream`文件夹，0.162的流动工况；
+
+```bash
+python ./scripts/dat_format.py --folder_path_input F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_64_32-4000_0.162_downstream/tecplot --folder_path_output F:/PIV_model_generate/PIV_dataset/dataset --variable_name PIV-3
+```
+
+`window_64_32-4000_0.216_downstream`文件夹，0.216的流动工况；
+
+```bash
+python ./scripts/dat_format.py --folder_path_input F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_64_32-4000_0.216_downstream/tecplot --folder_path_output F:/PIV_model_generate/PIV_dataset/dataset --variable_name PIV-4
+```
+
+`window_64_32-4000_0.108_downstream`文件夹，0.108的流动工况；
+
+```bash
+python ./scripts/dat_format.py --folder_path_input F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_64_32-4000_0.108_downstream/tecplot --folder_path_output F:/PIV_model_generate/PIV_dataset/dataset --variable_name PIV-5
+```
+
+`dat_format.py`中需要验证的部分
+
+|         代码中易错需要验证的部分         | 是否验证 |
+| :--------------------------------------: | :------: |
+|    三列数据到三通道矩阵像素数据的转换    |  已验证  |
+| 读取原始数据文件夹后文件进行排序是否正确 |  已验证  |
+
+## 1.2 数据集划分
+
+划分训练集、验证集与测试集
+
+形成train_dataset、validate_dataset、test_dataset三个文件夹。
+
+使用全部数据
+
+```bash
+python ./scripts/split_train_valid_dataset.py --raw_dataset_dir D:/Code/PIV_dataset/dataset --train_dataset_dir D:/Code/PIV_dataset/train_dataset --valid_dataset_dir D:/Code/PIV_dataset/validate_dataset --test_dataset_dir D:/Code/PIV_dataset/test_dataset --valid_samples_ratio 0.2 --test_samples_ratio 0.1 --all_flow_conditions_used
+```
+
+不使用全部数据
+
+```bash
+python ./scripts/split_train_valid_dataset.py --raw_dataset_dir F:/PIV_model_generate/PIV_dataset/dataset --train_dataset_dir F:/PIV_model_generate/PIV_dataset/train_dataset --valid_dataset_dir F:/PIV_model_generate/PIV_dataset/validate_dataset --test_dataset_dir F:/PIV_model_generate/PIV_dataset/test_dataset --valid_samples_ratio 0.2 --test_samples_ratio 0.1
+```
+
+使用全部数据
+
+```bash
+python ./scripts/split_train_valid_dataset.py --raw_dataset_dir F:/PIV_model_generate/PIV_dataset/dataset --train_dataset_dir F:/PIV_model_generate/PIV_dataset/train_dataset --valid_dataset_dir F:/PIV_model_generate/PIV_dataset/validate_dataset --test_dataset_dir F:/PIV_model_generate/PIV_dataset/test_dataset --valid_samples_ratio 0.2 --test_samples_ratio 0.1 --all_flow_conditions_used
+```
+
+
+
+## 1.3 数据shpae裁剪
+
+数据大小预处理
+
+形成train、validate、test三个文件夹。
+
+使用全部数据
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir F:/PIV_model_generate/PIV_dataset/train_dataset --output_dir F:/PIV_model_generate/PIV_dataset/train --flow_crop_height 44 --flow_crop_width 20 --all_flow_conditions_used --num_workers 4
+```
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir F:/PIV_model_generate/PIV_dataset/validate_dataset --output_dir F:/PIV_model_generate/PIV_dataset/validate --flow_crop_height 44 --flow_crop_width 20 --all_flow_conditions_used --num_workers 4
+```
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir F:/PIV_model_generate/PIV_dataset/test_dataset --output_dir F:/PIV_model_generate/PIV_dataset/test --flow_crop_height 44 --flow_crop_width 20 --all_flow_conditions_used --num_workers 4
+```
+
+不使用全部数据
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir F:/PIV_model_generate/PIV_dataset/train_dataset --output_dir F:/PIV_model_generate/PIV_dataset/train --flow_crop_height 44 --flow_crop_width 20 --num_workers 4
+```
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir F:/PIV_model_generate/PIV_dataset/validate_dataset --output_dir F:/PIV_model_generate/PIV_dataset/validate --flow_crop_height 44 --flow_crop_width 20 --num_workers 4
+```
+
+```bash
+python ./scripts/prepare_dataset.py --dataset_dir F:/PIV_model_generate/PIV_dataset/test_dataset --output_dir F:/PIV_model_generate/PIV_dataset/test --flow_crop_height 44 --flow_crop_width 20 --num_workers 4
+```
+
+
+
+## 1.4 归一化最值计算
+
+计算最大最小值，运行scripts/minimax_search.py。
+
+## 1.5 生成用于验证与测试的gt-lr数据对
+
+生成validate_lr、validate_gt、test_lr、test_gt四个文件夹；
+
+不执行归一化的话，validate_gt、test_gt两个文件夹与validate、test两个文件夹相同，执行归一化，那么validate_gt、test_gt两个文件夹就是validate、test两个文件夹的归一化版本。
+
+因为train的数据在Dataloader中直接成对的进行了resize，因此不需要要实现准备LR数据。
+
+不使用全部数据
+
+验证集，全在01的范围
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir F:/PIV_model_generate/PIV_dataset/validate --lr_dir_normalize F:/PIV_model_generate/PIV_dataset/validate_lr --gt_dir_normalize F:/PIV_model_generate/PIV_dataset/validate_lr_gt --down_sampling_mode random --normalized_choice normalized_used --down_sampling_factor 4 --num_workers 4
+```
+
+测试集，LR在01范围，GT不在，保证先归一化再下采样，而不是先下采样再归一化。
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir F:/PIV_model_generate/PIV_dataset/test --lr_dir_normalize F:/PIV_model_generate/PIV_dataset/test_lr --gt_dir_normalize F:/PIV_model_generate/PIV_dataset/test_lr_gt --down_sampling_mode random --normalized_choice normalized_unused --down_sampling_factor 4 --num_workers 4
+```
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir F:/PIV_model_generate/PIV_dataset/test --lr_dir_normalize F:/PIV_model_generate/PIV_dataset/test_lr --gt_dir_normalize F:/PIV_model_generate/PIV_dataset/test_lr_gt --down_sampling_mode pooling --normalized_choice normalized_used --down_sampling_factor 4 --num_workers 4
+```
+
+使用了全部数据
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir F:/PIV_model_generate/PIV_dataset/validate --lr_dir_normalize F:/PIV_model_generate/PIV_dataset/validate_lr --gt_dir_normalize F:/PIV_model_generate/PIV_dataset/validate_lr_gt --down_sampling_mode random --normalized_choice normalized_used --down_sampling_factor 4 --all_flow_conditions_used --num_workers 4
+```
+
+```bash
+python ./scripts/GT_LR_generate.py --gt_dir F:/PIV_model_generate/PIV_dataset/test --lr_dir_normalize F:/PIV_model_generate/PIV_dataset/test_lr --gt_dir_normalize F:/PIV_model_generate/PIV_dataset/test_lr_gt --down_sampling_mode random --normalized_choice normalized_unused --down_sampling_factor 4 --all_flow_conditions_used --num_workers 4
+```
+
+# 二、计算输入通道修改
+
+需要修改的内容包括：
+
+dataset.py文件的两个数据加载函数；
+
+config.py文件的输入输出通道数配置；
+
+# 三、推理计算推理计算数据
+
+对比几种变量对于最终测试结果的影响，训练集、验证集和测试集严格按照7：2：1的比例划分，都是速度模的误差，暂时没记录速度分量：
+
+|     模型     | 输出01限制 | 平均误差 | L2误差 |
+| :----------: | :--------: | :------: | :----: |
+| best.pth.tar |     否     |  0.2911  | 0.1997 |
+| last.pth.tar |     否     |  0.3310  | 0.2118 |
+| best.pth.tar |     是     |  0.2941  | 0.1984 |
+| last.pth.tar |     是     |  0.3334  | 0.2125 |
+
+**推理计算测试test数据**
+
+```bash
+python inference.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code/RDNopt/experimental_records/Single_flow_condition_20240408/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/test_lr --output_path F:/PIV_model_generate/PIV_dataset/test_lr_sr --upscale_factor 4
+```
+
+**推理计算所有源数据**
+
+```bash
+python inference_opt.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code/RDNopt/experimental_records/Single_flow_condition_20240415_all_dataset_pooling_1000/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/dataset --output_path F:/PIV_model_generate/PIV_dataset/dataset_sr --upscale_factor 4
+```
+
+```bash
+python inference_opt.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code\RDNopt/experimental_records/Single_flow_condition_20240415_all_dataset_cubic_1000/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/dataset --output_path F:/PIV_model_generate/PIV_dataset/dataset_sr --upscale_factor 4
+```
+
+**推理计算测试test数据**，带输出缩放的模型
+
+```bash
+python inference.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code/RDNopt/experimental_records/Single_flow_condition_01_20240328/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/test_lr --output_path F:/PIV_model_generate/PIV_dataset/test_lr_sr --upscale_factor 4
+```
+
+**推理计算所有源数据**，带输出缩放的模型
+
+```bash
+python inference.py --device_type cuda --model_arch_name rdn_large_x4 --model_weights_path F:/Code/RDNopt/experimental_records/Single_flow_condition_20240408/results/rdn_large_x4-PIV/best.pth.tar --inputs_path F:/PIV_model_generate/PIV_dataset/dataset --output_path F:/PIV_model_generate/PIV_dataset/dataset_sr --upscale_factor 4
+```
+
+**数学算法将LR数据上采样到SR数据**
+
+**数学算法将LR数据上采样到SR数据**
+
+2D_matrix_interpolation.py
+
+```shell
+python post/test_interpolation.py --folder_path_input F:/PIV_model_generate/PIV_dataset/test_lr --folder_path_output F:/PIV_model_generate/PIV_dataset/test_lr_interpolation --interpolation_method random
+```
+
+# 四、计算衍生参数
+
+计算TKE值
+
+原始数据
+
+```bash
+python post/TKE_calculate.py --input_path F:/PIV_model_generate/PIV_dataset/dataset --output_path_pulsation F:/PIV_model_generate/PIV_dataset/dataset_pulsation --output_path_tke F:/PIV_model_generate/PIV_dataset/dataset_TKE
+```
+
+重建数据
+
+```bash
+python post/TKE_calculate.py --input_path F:/PIV_model_generate/PIV_dataset/dataset_sr --output_path_pulsation F:/PIV_model_generate/PIV_dataset/dataset_sr_pulsation --output_path_tke F:/PIV_model_generate/PIV_dataset/dataset_sr_TKE
+```
+
+计算出来的TKE矩阵转为XYZQ结构
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/dataset_TKE --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/dataset_TKE --if_velocity_calculation V_Flase --if_normalized_velocity V_
+```
+
+
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/dataset_sr_TKE --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/dataset_sr_TKE --if_velocity_calculation V_Flase --if_normalized_velocity V_
+```
+
+test数据集中的LR矩阵转为XYZQ结构
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/test_lr --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/test_lr --if_velocity_calculation V_True --if_normalized_velocity V_nor
+```
+
+test数据集中的GT矩阵转为XYZQ结构，归一化的数据
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/test_lr_gt --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/test_lr_gt --if_velocity_calculation V_True --if_normalized_velocity V_nor
+```
+
+test数据集中的SR矩阵转为XYZQ结构，已经乘过了，不乘了
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/test_lr_sr --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/test_lr_sr --if_velocity_calculation V_True --if_normalized_velocity _
+```
+
+test数据集中的interpolation矩阵转为XYZQ结构，已经乘过了，不乘了
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/test_lr_interpolation --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/test_lr_interpolation --if_velocity_calculation V_True --if_normalized_velocity _
+```
+
+所有数据集中的SR矩阵转为XYZQ结构，已经乘过了，不乘了
+
+```bash
+python post/3D_2D_conversion.py --folder_path_input F:/PIV_model_generate/PIV_dataset/dataset_sr --folder_path_output F:/PIV_model_generate/PIV_dataset/XYZQ/dataset_sr --if_velocity_calculation V_True --if_normalized_velocity _
+```
+
+直接保存

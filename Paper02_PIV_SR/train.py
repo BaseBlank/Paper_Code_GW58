@@ -1,5 +1,5 @@
 """
-Ultimate ownership of all code in the repository belongs to this repository owner@BaseBlank of github.
+Ultimate ownership of all code in the repository belongs to this repository owner@BaseBlank of GitHub.
 This code repository is subject to AGPL-3.0, and to use this project code you must also comply with AGPL-3.0.
 About the specific content of AGPL - 3.0 protocol, you can refer to the following link:
     https://www.gnu.org/licenses/agpl-3.0.en.html
@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import config
 import model
-from dataset import CUDAPrefetcher, TrainValidImageDataset, TestImageDataset
+from dataset import CUDAPrefetcher, TrainValidFlowDataset, TestFlowDataset
 from image_quality_assessment import PSNR, SSIM
 from utils import load_state_dict, make_directory, save_checkpoint, AverageMeter, ProgressMeter
 
@@ -104,9 +104,11 @@ def main():
     loss_figure = []
     psrn_figure = []
     ssim_figure = []
+    val_loss_figure = []
     for epoch in range(start_epoch, config.epochs):
         loss_record = train(rdn_model, ema_rdn_model, train_prefetcher, criterion, optimizer, epoch, scaler, writer)
-        psnr, ssim = validate(rdn_model, test_prefetcher, epoch, writer, psnr_model, ssim_model, "Test")
+        psnr, ssim, val_loss_record = validate(rdn_model, test_prefetcher, epoch, writer, psnr_model, ssim_model,
+                                               criterion, "Test")
         print("\n")
 
         # Update LR
@@ -136,28 +138,30 @@ def main():
         loss_figure.append(loss_record_np)
         psrn_figure.append(psnr)
         ssim_figure.append(ssim)
+        val_loss_record_np = [i.cpu().detach().numpy() for i in val_loss_record]
+        val_loss_figure.append(val_loss_record_np)
 
     try:
         loss_figure = np.array(loss_figure, dtype=np.float32)
         np.savetxt(os.path.join(loss_figure_dir, 'loss_figure.csv'), loss_figure, fmt='%.32f', delimiter=',')
         np.savetxt(os.path.join(loss_figure_dir, 'psrn_figure.csv'), psrn_figure, fmt='%.32f', delimiter=',')
         np.savetxt(os.path.join(loss_figure_dir, 'ssim_figure.csv'), ssim_figure, fmt='%.32f', delimiter=',')
+        np.savetxt(os.path.join(loss_figure_dir, 'val_loss_figure.csv'), val_loss_figure, fmt='%.32f', delimiter=',')
+
     except:
         print('loss_figure.csv file was not saved successfully')
 
 
 def load_dataset() -> [CUDAPrefetcher, CUDAPrefetcher]:
     # Load train, test and valid datasets
-    train_datasets = TrainValidImageDataset(config.train_gt_images_dir,
-                                            config.gt_image_size_H,
-                                            config.gt_image_size_W,
-                                            config.upscale_factor,
-                                            "Train")
-    test_datasets = TestImageDataset(config.test_gt_images_dir,
-                                     config.test_lr_images_dir,
-                                     config.upscale_factor,
-                                     config.gt_image_size_H,
-                                     config.gt_image_size_W)
+    train_datasets = TrainValidFlowDataset(config.train_flow_dir,
+                                           config.gt_flow_size_H,
+                                           config.gt_flow_size_W,
+                                           config.upscale_factor,
+                                           "Train",
+                                           config.random_method, )
+    test_datasets = TestFlowDataset(config.test_gt_flows_dir,
+                                    config.test_lr_flows_dir, )
 
     # Generator all dataloader
     train_dataloader = DataLoader(train_datasets,
@@ -189,7 +193,8 @@ def build_model() -> [nn.Module, nn.Module]:
     rdn_model = rdn_model.to(device=config.device)
 
     # Create an Exponential Moving Average Model
-    ema_avg = lambda averaged_model_parameter, model_parameter, num_averaged: (1 - config.model_ema_decay) * averaged_model_parameter + config.model_ema_decay * model_parameter
+    ema_avg = lambda averaged_model_parameter, model_parameter, num_averaged: (
+                                                                                      1 - config.model_ema_decay) * averaged_model_parameter + config.model_ema_decay * model_parameter
     ema_rdn_model = AveragedModel(rdn_model, avg_fn=ema_avg)
 
     return rdn_model, ema_rdn_model
@@ -215,7 +220,9 @@ def define_optimizer(rdn_model) -> optim.Adam:
 
 # 随着epoch的增大而逐渐减小学习率，阶梯式衰减，每个一定的epoch，lr会自动乘以gamma进行阶梯式衰减
 def define_scheduler(optimizer) -> lr_scheduler.StepLR:
-    scheduler = lr_scheduler.StepLR(optimizer, config.lr_scheduler_step_size, config.lr_scheduler_gamma)
+    scheduler = lr_scheduler.StepLR(optimizer,
+                                    config.lr_scheduler_step_size,
+                                    config.lr_scheduler_gamma)
     return scheduler
 
 
@@ -266,6 +273,7 @@ def train(
         with amp.autocast():
             sr = rdn_model(lr)
             loss = torch.mul(config.loss_weights, criterion(sr, gt))
+
             loss_record.append(loss)
 
         # Backpropagation
@@ -306,6 +314,7 @@ def validate(
         writer: SummaryWriter,
         psnr_model: nn.Module,
         ssim_model: nn.Module,
+        criterion: nn.L1Loss,
         mode: str
 ) -> [float, float]:
     # Calculate how many batches of data are in each Epoch
@@ -327,6 +336,9 @@ def validate(
     # Get the initialization test time
     end = time.time()
 
+    # record val loss
+    loss_record = []
+
     with torch.no_grad():
         while batch_data is not None:
             # Transfer the in-memory data to the CUDA device to speed up the test
@@ -335,6 +347,10 @@ def validate(
 
             # Use the generator model to generate a fake sample
             sr = rdn_model(lr)
+
+            # gain val loss
+            loss = torch.mul(config.loss_weights, criterion(sr, gt))
+            loss_record.append(loss)
 
             # Statistical loss value for terminal data output
             psnr = psnr_model(sr, gt)
@@ -366,7 +382,7 @@ def validate(
     else:
         raise ValueError("Unsupported mode, please use `Valid` or `Test`.")
 
-    return psnres.avg, ssimes.avg
+    return psnres.avg, ssimes.avg, loss_record
 
 
 if __name__ == "__main__":

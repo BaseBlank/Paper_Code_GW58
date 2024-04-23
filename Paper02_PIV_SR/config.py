@@ -9,7 +9,6 @@ The link to the reference code repository is as follows:
 """
 # ==============================================================================
 import random
-
 import numpy as np
 import torch
 from torch.backends import cudnn
@@ -23,29 +22,32 @@ device = torch.device("cuda", 0)
 # Turning on when the image size does not change during training can speed up training
 cudnn.benchmark = True
 # When evaluating the performance of the SR model, whether to verify only the Y channel image data
-only_test_y_channel = False
+only_test_y_channel = False  # default: True
 # Model architecture name
-model_arch_name = "rdn_small_x4"
+model_arch_name = "rdn_large_x4"
 # Model arch config
-in_channels = 3
-out_channels = 3
+in_channels = 2  # 3
+out_channels = 2  # 3
 channels = 64
 upscale_factor = 4
 # Current configuration parameter method
 mode = "train"  # "train"
 # Experiment name, easy to save weights and log files
-exp_name = "RDN_small_x4-PIV"  # "RDN_small_x4-DIV2K"
+exp_name = "rdn_large_x4-PIV"  # "RDN_small_x4-DIV2K"
 
 if mode == "train":
     # Dataset address
-    train_gt_images_dir = f"F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_96_48_24/model_data"
+    train_flow_dir = f"F:/PIV_model_generate/PIV_dataset/train"
 
-    test_gt_images_dir = f"F:/PIV_export/No_Heating/center_blockage_0.7/middle/window_96_48_24/model_test"
-    test_lr_images_dir = f"./data/Set5/LRbicx{upscale_factor}"
+    # Testing during training is really verification.
+    test_gt_flows_dir = f"F:/PIV_model_generate/PIV_dataset/validate_lr_gt"
+    test_lr_flows_dir = f"F:/PIV_model_generate/PIV_dataset/validate_lr"
 
-    gt_image_size_H = int(59-3)  # default: upscale_factor * 32
-    gt_image_size_W = int(29-1)
-    batch_size = int(16 * 1)  # default:16，越小越好，精度高，但是时间成本很高，论文是16，一开始自己用的64
+    gt_flow_size_H = int(44)  # default: upscale_factor * 32, int(59-3)
+    gt_flow_size_W = int(22-2)  # int(29-1)
+    random_method = "random"
+
+    batch_size = int(16 * 8)  # default:16，越小越好，精度高，但是时间成本很高，论文是16，一开始自己用的64
     num_workers = 4
 
     # The address to load the pretrained model，预训练模型
@@ -55,7 +57,7 @@ if mode == "train":
     resume_model_weights_path = f""
 
     # Total num epochs
-    epochs = 2000
+    epochs = 1000  # default: 1000
 
     # Loss function weight
     loss_weights = 1.0
@@ -70,12 +72,12 @@ if mode == "train":
     model_ema_decay = 0.99998
 
     # Dynamically adjust the learning rate policy
-    lr_scheduler_step_size = 200 * 2  # default: 200
+    lr_scheduler_step_size = 200  # default: 200
     lr_scheduler_gamma = 0.5
 
     # How many iterations to print the training result
-    train_print_frequency = 100
-    valid_print_frequency = 100 * 2
+    train_print_frequency = 20  # default: 20, 40
+    valid_print_frequency = 400  # default: 400, 1000
 
 if mode == "test":
     gt_image_size_H = int(59-3)

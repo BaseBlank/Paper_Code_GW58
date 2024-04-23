@@ -14,10 +14,11 @@ from typing import Any
 import torch
 from torch import Tensor
 from torch import nn
-#
+
+
 __all__ = [
     "RDN",
-    "rdn_small_x2", "rdn_small_x3", "rdn_small_x4", "rdn_large_x8",
+    "rdn_small_x2", "rdn_small_x3", "rdn_small_x4", "rdn_small_x8",
     "rdn_large_x2", "rdn_large_x3", "rdn_large_x4", "rdn_large_x8",
 ]
 
@@ -156,7 +157,7 @@ class RDN(nn.Module):
         out = self.upsampling(out)  # [channels * upscale_factor * upscale_factor ** math.log(upscale_factor, 2), H, W]
         out = self.conv3(out)  # [3, H, W]
 
-        out = torch.clamp_(out, 0.0, 1.0)  # 将输入input张量每个元素的范围限制到区间 [min,max]，返回结果到一个新张量
+        # out = torch.clamp_(out, 0.0, 1.0)  # 将输入input张量每个元素的范围限制到区间 [min,max]，返回结果到一个新张量
 
         return out
 
@@ -205,5 +206,11 @@ def rdn_large_x4(**kwargs: Any) -> RDN:
 
 def rdn_large_x8(**kwargs: Any) -> RDN:
     model = RDN(num_rdb=20, num_rb=16, growth_channels=32, upscale_factor=8, **kwargs)
+
+    return model
+
+
+def rdn_base_cnn(**kwargs: Any) -> RDN:
+    model = RDN(num_rdb=2, num_rb=1, growth_channels=3, upscale_factor=4, **kwargs)
 
     return model
